@@ -3,39 +3,18 @@ from dotenv import load_dotenv
 from huggingface_hub import InferenceClient, ChatCompletionOutput
 import models
 from utils import _load_json_content
+from prompts import GORGIAS_SPEC
+import copy
 
 load_dotenv()
 client = InferenceClient(api_key=os.getenv("HF_TOKEN"))
-DEFAULT_MODEL = "Qwen/Qwen3-4B-Instruct-2507:cheapest"
-
-GORGIAS_SPEC = """
-Gorgias Syntax Spec (Prolog-based Argumentation Framework)
-
-CORE: rule/3 defines all defeasible knowledge.
-- rule(Label, Head, Body).
-  - Label: unique compound term (e.g., r1(X), pr1(X,Y))
-  - Head: literal (p(X) or neg(p(X)))
-  - Body: [lit1, lit2], cond1, cond2
-    Conditions: Prolog arithmetic (=, \\=, >=, =<, >, <, =:=, \\==)
-
-TYPES:
-- Facts: rule(f1, p(a), []).
-- Rules: rule(r1(X), p(X), [q(X)]).
-- Conflicts: rule(c1(X), neg(p(X)), [r(X)]).
-- Preferences: rule(pr1(X), prefer(r2(X), r1(X)), [context(X)]).
-
-ABDUCIBLES: abducible(Lit, Preconditions).
-QUERIES: decide(Lit). explain(Lit, Args).
-HIERARCHY: Level N+1 preferences resolve conflicts from Level N.
-BACKGROUND: Standard Prolog facts/rules (strict).
-"""
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct:cheapest" # "Qwen/Qwen3-4B-Instruct-2507:cheapest"
 
 def generate_system_prompt():
     return (
-        f"You are a Gorgias Prolog expert. Convert natural language to valid Gorgias Prolog code using ONLY this spec:\n"
+        "You are an expert in the Gorgias argumentation framework. Your task is to translate a natural language decision scenario into valid Gorgias code using ONLY this spec:\n"
         f"{GORGIAS_SPEC}\n"
         "Response MUST ONLY be valid JSON. No explanations outside JSON:\n"
-        # '- "message": Short, conversational response. Confirm successful conversion or explain any assumptions made.'
         '- "message": Brief technical summary of rules created. List rule types and key structure (1 sentence). Examples: "Default fly rule r1(X) defeated by penguin conflict c1(X)." or "Preference pr1(X) between r_low(X) and r_high(X) over cash condition."\n'
         '- "code": Complete and Syntaxically correct Gorgias Prolog code.'
     )
@@ -58,30 +37,30 @@ def _extract_completion_text(completion: ChatCompletionOutput) -> models.Gorgias
     
     return models.GorgiasUserOutput(message=response_message, code_lines=response_code_lines)
 
-def nl_to_gorgias(nl_input: str) -> models.GorgiasUserOutput:
-    system_prompt = generate_system_prompt()
-    user_prompt = f"Convert to Gorgias Prolog: {nl_input}"
-    
-    completion = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "GorgiasOutput",
-                "schema": models.GorgiasChatOutput.model_json_schema(),
-                "strict": True,
-            },
-        }
-    )
 
-    return _extract_completion_text(completion)
+def syntax_check(code_lines: list[str]) -> bool:
+    return True
+
+def nl_to_gorgias_with_history(messages) -> models.GorgiasUserOutput:    
+    conversation: list[dict[str, str]] = copy.deepcopy(messages)
+    
+    while True:
+        completion = client.chat.completions.create(
+            model=DEFAULT_MODEL,
+            messages=conversation,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "GorgiasOutput",
+                    "schema": models.GorgiasChatOutput.model_json_schema(),
+                    "strict": True,
+                },
+            }
+        )
+        result = _extract_completion_text(completion)
+
+        if syntax_check(result.code_lines):
+            return result
+
+        correction_prompt = "The previous Gorgias code had syntax errors. Correct the code and return only valid JSON as before."
+        conversation.append({"role": "user", "content": correction_prompt})
