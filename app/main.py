@@ -1,4 +1,4 @@
-from chat import generate_system_prompt, nl_to_gorgias_with_history
+from chat import nl_to_gorgias_with_history
 import json
 from utils import display_code
 
@@ -6,8 +6,7 @@ def main():
     print("====== Gorgias Chatbot Started ======")
     print("Type 'quit' or 'exit' to stop\n")
 
-    system_prompt = generate_system_prompt()
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = []
 
     while True:
         user_input = input("==> You: ").strip()
@@ -23,9 +22,27 @@ def main():
         messages.append({"role": "user", "content": f"Convert to Gorgias Prolog: {user_input}"})
 
         try:
-            result = nl_to_gorgias_with_history(messages)
+            def on_progress(stage: str, payload: dict) -> None:
+                if stage == "intent_extraction_started":
+                    print("\n[status] Extracting intents...")
+                elif stage == "intent_extraction_completed":
+                    confidence = payload.get("confidence")
+                    intents = payload.get("intents")
+                    if isinstance(confidence, (int, float)):
+                        print(f"[status] Intents extracted (confidence: {confidence:.2f})")
+                    else:
+                        print("[status] Intents extracted")
+                    if isinstance(intents, list) and intents:
+                        print("[status] Extracted intents:")
+                        for index, intent in enumerate(intents, start=1):
+                            print(f"  {index}. {intent}")
+                elif stage == "code_generation_started":
+                    print("[status] Generating Gorgias code...")
+
+            result = nl_to_gorgias_with_history(messages, progress_callback=on_progress)
             print(f"\n==> Assistant: {result.message}\n")
-            display_code(result.code_lines)
+            if result.code_lines:
+                display_code(result.code_lines)
             print("\n"+"-" * 60)
             assistant_content = json.dumps({"message": result.message, "code": "\n".join(result.code_lines)})
             messages.append({"role": "assistant", "content": assistant_content})
