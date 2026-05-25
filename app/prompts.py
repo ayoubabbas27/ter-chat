@@ -1,3 +1,5 @@
+import json
+
 GORGIAS_SPEC = """
 ## GORGIAS CODE STRUCTURE
 A Gorgias program consists of the following elements in this exact order:
@@ -467,38 +469,48 @@ abducible(neg(rainy_day), []).
 """
 
 
-def build_intent_extraction_prompt() -> str:
+def build_conversation_context(conversation: list[dict], current_code: str) -> str:
+	lines = ["## Conversation (most recent last)"]
+	for message in conversation:
+		role = message.get("role", "user").upper()
+		content = message.get("content", "")
+		if role == "ASSISTANT":
+			try:
+				parsed = json.loads(content)
+				content = parsed.get("message", content)
+			except Exception:
+				pass
+		lines.append(f"{role}: {content}")
+	lines.append("\n## Current Gorgias program (baseline to update)")
+	lines.append(current_code if current_code.strip() else "(empty — use the spec template structure)")
+	lines.append(
+		"\nUpdate the program to reflect the user's latest request. "
+		"Return only valid JSON with keys \"message\" and \"code\"."
+	)
+	return "\n".join(lines)
+
+
+def build_syntax_correction_prompt(code: str, errors: list[dict]) -> str:
+	error_lines = "\n".join(f"- {e.get('message', e)}" for e in errors)
 	return (
-		"You are an intent extractor for a Gorgias code assistant. "
-		"Read the conversation and extract the user's current intent for a Gorgias translation task. "
-		"Return only valid JSON with this shape: "
-		'{"confidence": number from 0 to 1, "intents": ["bullet point 1", "bullet point 2", ...]}. '
-		"Keep the intents concise, ordered, and aligned with the order the code would be written. "
-		"Do not generate Gorgias code. Do not include explanations outside JSON."
+		"The Gorgias code below failed syntax validation. Fix every syntax error.\n"
+		"Return only valid JSON with keys \"message\" and \"code\".\n\n"
+		f"Syntax errors:\n{error_lines}\n\n"
+		f"Code to fix:\n{code}"
 	)
 
 
-def build_code_correction_prompt(intents: list[str], confidence: float, baseline_code: str) -> str:
-	intent_lines = "\n".join(f"- {intent}" for intent in intents)
-	return (
-		"You are an expert in the Gorgias argumentation framework. "
-		"Your job is to revise the provided syntactically correct baseline Gorgias code so it satisfies the extracted user intents while keeping the code syntactically correct. "
-		"Use the reference spec and treat the baseline code as editable scaffolding. Keep only what is needed for the current intents.\n\n"
-		"STRICT MINIMALITY REQUIREMENT:\n"
-		"- The output must satisfy ONLY the extracted user intents.\n"
-		"- Remove all unrelated baseline/template artifacts (rules, facts, complements, abducibles, preferences).\n"
-		"- If an element is not required by the current intents, it must not appear in the final code.\n\n"
-		f"Reference spec:\n{GORGIAS_SPEC_2}\n\n"
-		f"Baseline code to correct:\n{baseline_code}\n\n"
-		"Extracted user intents:\n"
-		f"{intent_lines}\n\n"
-		f"Extractor confidence: {confidence:.2f}\n\n"
-		"Return only valid JSON with exactly these keys: \"message\" and \"code\". "
-		"The message should be a short technical summary of the final generated code only (what rules/prefs it contains and how they satisfy intent). "
-		"Do not describe edits to prior code, removals, or template cleanup history. "
-		"The code must be complete and syntactically correct Gorgias Prolog."
+def build_semantic_correction_prompt(code: str, issues: list[dict]) -> str:
+	issue_lines = "\n".join(
+		f"- [{i.get('check', '?')}] {i.get('message', i)}" for i in issues
 	)
-
+	return (
+		"The Gorgias code below failed semantic validation (structural rules and/or Gorgias Cloud).\n"
+		"Fix all reported issues while keeping the program consistent with the conversation.\n"
+		"Return only valid JSON with keys \"message\" and \"code\".\n\n"
+		f"Validation issues:\n{issue_lines}\n\n"
+		f"Code to fix:\n{code}"
+	)
 
 
 GORGIAS_SPEC_2 = """
@@ -1008,3 +1020,19 @@ reasoning chains — they NEVER mix.
 ---
 Would you like to test this updated prompt on a new scenario?
 """
+
+
+def generate_system_prompt() -> str:
+	return (
+		"You are an expert in the Gorgias argumentation framework. "
+		"Your task is to update the current Gorgias program based on the user's conversation using ONLY this spec:\n"
+		f"{GORGIAS_SPEC_2}\n"
+		"IMPORTANT MINIMALITY RULE: The final code must satisfy the user's requests in the conversation. "
+		"Remove any unrelated or leftover baseline/template rules, facts, complements, and abducibles that are not required.\n"
+		"Do not preserve prior scenario logic unless it is still required by the conversation.\n"
+		"Response MUST ONLY be valid JSON. No explanations outside JSON:\n"
+		'- "message": Brief technical summary of the FINAL GENERATED CODE ONLY (1 sentence). '
+		"Describe the visible rule structure in the final code and why it captures the scenario. "
+		"Do NOT mention removed/old/template code or revision history.\n"
+		'- "code": Complete, syntactically and semantically correct Gorgias Prolog code.'
+	)

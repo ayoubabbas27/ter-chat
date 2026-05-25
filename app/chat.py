@@ -1,198 +1,251 @@
+import json
 import os
 from typing import Any, Callable
-from dotenv import load_dotenv
-from huggingface_hub import InferenceClient, ChatCompletionOutput
-import models
-from utils import _load_json_content
-from prompts import GORGIAS_CORRECTION_TEMPLATE, GORGIAS_SPEC_2, build_code_correction_prompt, build_intent_extraction_prompt
 
-load_dotenv()
-client = InferenceClient(api_key=os.getenv("HF_TOKEN"))
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct:cheapest" # "Qwen/Qwen3-4B-Instruct-2507:cheapest"
-INTENT_CONFIDENCE_THRESHOLD = 0.70
+import anthropic
+
+import models
+from env import load_project_env
+from gorgias_cloud import validate_on_cloud
+from gorgias_semantic import check_semantic
+from gorgias_syntax import check_syntax
+from prompts import (
+    GORGIAS_CORRECTION_TEMPLATE,
+    build_conversation_context,
+    build_semantic_correction_prompt,
+    build_syntax_correction_prompt,
+    generate_system_prompt,
+)
+from utils import _load_json_content
+
+load_project_env()
+
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+MAX_CONTEXT_MESSAGES = 12
+MAX_SYNTAX_RETRIES = 5
+MAX_SEMANTIC_RETRIES = 3
+
 ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
-def _emit_progress(progress_callback: ProgressCallback | None, stage: str, payload: dict[str, Any] | None = None) -> None:
-    if not progress_callback:
-        return
-
-    progress_callback(stage, payload or {})
-
-def generate_system_prompt():
-    return (
-        "You are an expert in the Gorgias argumentation framework. Your task is to update a syntactically correct but semantically generic baseline Gorgias program so it satisfies extracted user intents using ONLY this spec:\n"
-        f"{GORGIAS_SPEC_2}\n"
-        "IMPORTANT MINIMALITY RULE: The final code must satisfy ONLY the extracted user intents. Remove any unrelated or leftover baseline/template rules, facts, complements, and abducibles that are not required by the current intents.\n"
-        "Do not preserve prior scenario logic unless it is directly required by the current intents.\n"
-        "Response MUST ONLY be valid JSON. No explanations outside JSON:\n"
-        '- "message": Brief technical summary of the FINAL GENERATED CODE ONLY (1 sentence). Describe the visible rule structure in the final code and why it captures the intent. Do NOT mention removed/old/template code or revision history.\n'
-        '- "code": Complete, Syntaxically and Semantically correct Gorgias Prolog code.'
-    )
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    stage: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if progress_callback:
+        progress_callback(stage, payload or {})
 
 
-def generate_intent_extractor_system_prompt():
-    return build_intent_extraction_prompt()
-
-def _extract_completion_text(completion: ChatCompletionOutput) -> models.GorgiasUserOutput:
-
-    message = completion.choices[0].message
-    content = getattr(message, "content", None)
-
-    if not content:
-        raise ValueError("No content in model response")
-    
-    parsed = _load_json_content(content)
-
-    if "message" not in parsed or "code" not in parsed:
-        raise ValueError("Response missing required keys: 'message' or 'code'")
-    
-    response_message = str(parsed["message"]).strip()
-    response_code_lines = str(parsed["code"]).strip().splitlines()
-    
-    return models.GorgiasUserOutput(message=response_message, code_lines=response_code_lines)
-
-
-def _extract_intent_result(completion: ChatCompletionOutput) -> models.GorgiasIntentExtractionOutput:
-    message = completion.choices[0].message
-    content = getattr(message, "content", None)
-
-    if not content:
-        raise ValueError("No content in intent extraction response")
-
-    parsed = _load_json_content(content)
-
-    if "confidence" not in parsed or "intents" not in parsed:
-        raise ValueError("Response missing required keys: 'confidence' or 'intents'")
-
-    confidence = float(parsed["confidence"])
-    intents = [str(intent).strip() for intent in parsed["intents"] if str(intent).strip()]
-
-    return models.GorgiasIntentExtractionOutput(confidence=confidence, intents=intents)
-
-
-def _extract_latest_baseline_code(messages) -> str:
+def _extract_latest_code(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get("role") != "assistant":
             continue
-
         content = message.get("content", "")
-        parsed = None
         try:
             parsed = _load_json_content(content)
         except Exception:
             continue
-
         code = parsed.get("code") if isinstance(parsed, dict) else None
         if isinstance(code, str) and code.strip():
             return code.strip()
-
     return GORGIAS_CORRECTION_TEMPLATE.strip()
 
 
-def syntax_check(code_lines: list[str]) -> bool:
-    return True
+def _conversation_window(messages: list[dict]) -> list[dict]:
+    conversation = [m for m in messages if m.get("role") in ("user", "assistant")]
+    return conversation[-MAX_CONTEXT_MESSAGES:]
 
 
-def extract_user_intents_with_history(
-    messages,
-    progress_callback: ProgressCallback | None = None,
-) -> models.GorgiasIntentExtractionOutput:
-    _emit_progress(progress_callback, "intent_extraction_started")
-    conversation: list[dict[str, str]] = [message for message in messages if message.get("role") != "system"]
-
-    completion = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        messages=[
-            {"role": "system", "content": generate_intent_extractor_system_prompt()},
-            *conversation,
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "GorgiasIntentExtractionOutput",
-                "schema": models.GorgiasIntentExtractionOutput.model_json_schema(),
-                "strict": True,
-            },
-        },
+def _parse_llm_response(response: anthropic.types.Message) -> models.GorgiasUserOutput:
+    text = "".join(block.text for block in response.content if block.type == "text")
+    if not text.strip():
+        raise ValueError("No text in model response")
+    parsed = _load_json_content(text)
+    if "message" not in parsed or "code" not in parsed:
+        raise ValueError("Response missing required keys: 'message' or 'code'")
+    return models.GorgiasUserOutput(
+        message=str(parsed["message"]).strip(),
+        code_lines=str(parsed["code"]).strip().splitlines(),
     )
 
-    intent_result = _extract_intent_result(completion)
+
+def _call_llm(user_content: str, extra_messages: list[dict] | None = None) -> models.GorgiasUserOutput:
+    api_messages: list[dict] = list(extra_messages or [])
+    api_messages.append({"role": "user", "content": user_content})
+    response = client.messages.create(
+        model=DEFAULT_MODEL,
+        max_tokens=8192,
+        system=generate_system_prompt(),
+        messages=api_messages,
+    )
+    return _parse_llm_response(response)
+
+
+def _code_to_str(result: models.GorgiasUserOutput) -> str:
+    return "\n".join(result.code_lines)
+
+
+def _assistant_json(result: models.GorgiasUserOutput) -> str:
+    return json.dumps({"message": result.message, "code": _code_to_str(result)})
+
+
+def _generate_initial(
+    messages: list[dict],
+    current_code: str,
+    progress_callback: ProgressCallback | None,
+) -> models.GorgiasUserOutput:
+    window = _conversation_window(messages)
+    user_content = build_conversation_context(window, current_code)
+    _emit_progress(progress_callback, "generating")
+    result = _call_llm(user_content)
+    _emit_progress(progress_callback, "generated")
+    return result
+
+
+def _last_user_turn(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", "")).strip()
+    return ""
+
+
+def _fix_syntax(
+    result: models.GorgiasUserOutput,
+    errors: list[dict],
+    messages: list[dict],
+    progress_callback: ProgressCallback | None,
+    attempt: int,
+) -> models.GorgiasUserOutput:
+    code = _code_to_str(result)
     _emit_progress(
         progress_callback,
-        "intent_extraction_completed",
-        {"confidence": intent_result.confidence, "intents": intent_result.intents},
+        "correcting_syntax",
+        {"attempt": attempt, "max_attempts": MAX_SYNTAX_RETRIES},
+    )
+    prompt = build_syntax_correction_prompt(code, errors)
+    user_turn = _last_user_turn(messages)
+    if user_turn:
+        prompt += f"\n\nOriginal user request to preserve:\n{user_turn}"
+    return _call_llm(
+        prompt,
+        extra_messages=[{"role": "assistant", "content": _assistant_json(result)}],
     )
 
-    return intent_result
 
-
-def correct_gorgias_from_intents(
-    messages,
-    intent_result: models.GorgiasIntentExtractionOutput,
-    progress_callback: ProgressCallback | None = None,
+def _fix_semantic(
+    result: models.GorgiasUserOutput,
+    issues: list[dict],
+    messages: list[dict],
+    progress_callback: ProgressCallback | None,
+    attempt: int,
 ) -> models.GorgiasUserOutput:
-    _emit_progress(progress_callback, "code_generation_started")
-    baseline_code = _extract_latest_baseline_code(messages)
-
-    completion = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        messages=[
-            {"role": "system", "content": generate_system_prompt()},
-            {"role": "user", "content": build_code_correction_prompt(intent_result.intents, intent_result.confidence, baseline_code)},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "GorgiasOutput",
-                "schema": models.GorgiasChatOutput.model_json_schema(),
-                "strict": True,
-            },
-        },
+    code = _code_to_str(result)
+    _emit_progress(
+        progress_callback,
+        "correcting_semantic",
+        {"attempt": attempt, "max_attempts": MAX_SEMANTIC_RETRIES},
+    )
+    prompt = build_semantic_correction_prompt(code, issues)
+    user_turn = _last_user_turn(messages)
+    if user_turn:
+        prompt += f"\n\nOriginal user request to preserve:\n{user_turn}"
+    return _call_llm(
+        prompt,
+        extra_messages=[{"role": "assistant", "content": _assistant_json(result)}],
     )
 
-    result = _extract_completion_text(completion)
 
-    if syntax_check(result.code_lines):
-        _emit_progress(progress_callback, "code_generation_completed", {"retry": False})
-        return result
+def _run_syntax_loop(
+    result: models.GorgiasUserOutput,
+    messages: list[dict],
+    progress_callback: ProgressCallback | None,
+) -> models.GorgiasUserOutput:
+    for attempt in range(1, MAX_SYNTAX_RETRIES + 1):
+        code = _code_to_str(result)
+        _emit_progress(progress_callback, "syntax_check", {"attempt": attempt})
+        syntax_ok, errors, _ = check_syntax(code)
+        if syntax_ok:
+            _emit_progress(progress_callback, "syntax_ok")
+            return result
+        _emit_progress(progress_callback, "syntax_failed", {"errors": errors, "attempt": attempt})
+        if attempt >= MAX_SYNTAX_RETRIES:
+            raise RuntimeError(
+                f"Syntax validation failed after {MAX_SYNTAX_RETRIES} attempts.\n"
+                + "\n".join(e["message"] for e in errors)
+            )
+        result = _fix_syntax(result, errors, messages, progress_callback, attempt)
+    return result
 
-    correction_prompt = "The previous Gorgias code had syntax errors. Correct the code and return only valid JSON as before."
-    retry_completion = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        messages=[
-            {"role": "system", "content": generate_system_prompt()},
-            {"role": "user", "content": build_code_correction_prompt(intent_result.intents, intent_result.confidence, baseline_code)},
-            {"role": "user", "content": correction_prompt},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "GorgiasOutput",
-                "schema": models.GorgiasChatOutput.model_json_schema(),
-                "strict": True,
+
+def _run_semantic_loop(
+    result: models.GorgiasUserOutput,
+    messages: list[dict],
+    progress_callback: ProgressCallback | None,
+) -> models.GorgiasUserOutput:
+    for attempt in range(1, MAX_SEMANTIC_RETRIES + 1):
+        result = _run_syntax_loop(result, messages, progress_callback)
+
+        code = _code_to_str(result)
+        _emit_progress(progress_callback, "semantic_check", {"attempt": attempt})
+
+        local_ok, local_issues, _ = check_semantic(code)
+        if not local_ok:
+            _emit_progress(
+                progress_callback,
+                "semantic_failed",
+                {"issues": local_issues, "source": "local", "attempt": attempt},
+            )
+            if attempt >= MAX_SEMANTIC_RETRIES:
+                raise RuntimeError(
+                    f"Semantic validation failed after {MAX_SEMANTIC_RETRIES} attempts.\n"
+                    + "\n".join(i["message"] for i in local_issues)
+                )
+            result = _fix_semantic(result, local_issues, messages, progress_callback, attempt)
+            continue
+
+        _emit_progress(progress_callback, "semantic_local_ok")
+
+        _emit_progress(progress_callback, "cloud_check", {"attempt": attempt})
+        cloud_ok, cloud_issues, cloud_message, cloud_details = validate_on_cloud(code)
+        if cloud_ok:
+            _emit_progress(
+                progress_callback,
+                "cloud_ok",
+                {"message": cloud_message, "details": cloud_details},
+            )
+            _emit_progress(progress_callback, "semantic_ok")
+            return result
+
+        _emit_progress(
+            progress_callback,
+            "cloud_failed",
+            {
+                "issues": cloud_issues,
+                "message": cloud_message,
+                "details": cloud_details,
+                "attempt": attempt,
             },
-        },
-    )
+        )
+        if attempt >= MAX_SEMANTIC_RETRIES:
+            raise RuntimeError(
+                f"Cloud semantic validation failed after {MAX_SEMANTIC_RETRIES} attempts.\n"
+                + (cloud_message or "")
+                + "\n"
+                + "\n".join(i["message"] for i in cloud_issues)
+            )
+        result = _fix_semantic(result, cloud_issues, messages, progress_callback, attempt)
 
-    retry_result = _extract_completion_text(retry_completion)
-    _emit_progress(progress_callback, "code_generation_completed", {"retry": True})
-    return retry_result
+    return result
+
 
 def nl_to_gorgias_with_history(
-    messages,
+    messages: list[dict],
     progress_callback: ProgressCallback | None = None,
 ) -> models.GorgiasUserOutput:
-    intent_result = extract_user_intents_with_history(messages, progress_callback=progress_callback)
-
-    if intent_result.confidence < INTENT_CONFIDENCE_THRESHOLD:
-        return models.GorgiasUserOutput(
-            message=(
-                "I need a bit more detail before I can update the Gorgias code. "
-                "Please clarify the scenario, candidate actions, and the exact preference/exception conditions "
-                f"(intent confidence {intent_result.confidence:.2f} < {INTENT_CONFIDENCE_THRESHOLD:.2f})."
-            ),
-            code_lines=[],
-        )
-
-    return correct_gorgias_from_intents(messages, intent_result, progress_callback=progress_callback)
+    current_code = _extract_latest_code(messages)
+    result = _generate_initial(messages, current_code, progress_callback)
+    result = _run_semantic_loop(result, messages, progress_callback)
+    _emit_progress(progress_callback, "complete")
+    return result
