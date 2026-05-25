@@ -1,0 +1,90 @@
+.create-session-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.4);
+  padding: 1rem;
+}
+
+.create-session-dialog {
+  width: 100%;
+  max-width: 400px;
+  padding: 1.25rem;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.create-session-dialog h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.create-session-hint {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.create-session-dialog input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #d0d4dc;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.create-session-dialog input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.create-session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.create-session-actions button {
+  padding: 0.45rem 0.9rem;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.create-session-actions .btn-secondary {
+  border: 1px solid #d0d4dc;
+  background: #fff;
+  color: #555;
+}
+
+.create-session-actions button[type="submit"] {
+  border: none;
+  background: #2563eb;
+  color: #fff;
+}
+
+.create-session-actions .btn-danger {
+  border: none;
+  background: #b42318;
+  color: #fff;
+}
+
+.create-session-actions .btn-danger:hover:not(:disabled) {
+  background: #991b1b;
+}
+
+.create-session-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

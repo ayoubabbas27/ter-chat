@@ -1,3 +1,14 @@
-.venv
+backend/.venv/
+backend/.env
 
+# Optional docker-compose port overrides (API_HOST_PORT, UI_HOST_PORT)
 .env
+
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+
+frontend/node_modules/
+frontend/dist/
+
+data/

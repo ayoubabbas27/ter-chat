@@ -1,0 +1,117 @@
+.session-select {
+  position: relative;
+  min-width: 0;
+  max-width: 280px;
+}
+
+.session-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  max-width: 280px;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid #d0d4dc;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #333;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.session-select-trigger:hover:not(:disabled) {
+  border-color: #2563eb;
+}
+
+.session-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.session-select-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.session-select-chevron {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.session-select-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 20;
+  width: min(320px, 90vw);
+  background: #fff;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+.session-select-new {
+  display: block;
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: none;
+  border-bottom: 1px solid #e2e4e8;
+  background: #f8fafc;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #2563eb;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-select-new:hover {
+  background: #eef4ff;
+}
+
+.session-select-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.session-select-item {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 0.85rem;
+  color: #333;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-select-item:hover {
+  background: #f5f7fa;
+}
+
+.session-select-item.active {
+  background: #eef4ff;
+  color: #1d4ed8;
+  font-weight: 500;
+}
+
+.session-select-empty {
+  margin: 0;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+  color: #888;
+}
